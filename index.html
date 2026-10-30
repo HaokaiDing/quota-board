@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>额度看板</title>
+<style>
+:root {
+  --bg: #f6f5f1; --card: #ffffff; --ink: #1d1d1b; --muted: #6f6e69; --line: #e4e2db;
+  --track: #ecebe5; --ok: #2f8f5b; --warn: #c98a12; --bad: #c4452f; --accent: #2b5fd9;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #151514; --card: #1f1f1d; --ink: #ecebe6; --muted: #9b9a93; --line: #2f2f2c;
+    --track: #2c2c29; --ok: #4fbf84; --warn: #e2a93b; --bad: #e46a52; --accent: #7aa2ff;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #151514; --card: #1f1f1d; --ink: #ecebe6; --muted: #9b9a93; --line: #2f2f2c;
+  --track: #2c2c29; --ok: #4fbf84; --warn: #e2a93b; --bad: #e46a52; --accent: #7aa2ff;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif; }
+main { max-width: 1080px; margin: 0 auto; padding: 28px 16px 48px; }
+h1 { font-size: 22px; margin: 0 0 4px; font-weight: 650; }
+.sub { color: var(--muted); font-size: 13px; }
+.sub b { color: var(--ink); font-weight: 600; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; margin-top: 20px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+.card.current { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.head { display: flex; justify-content: space-between; align-items: start; gap: 8px; }
+.name { font-weight: 650; font-size: 16px; }
+.email { color: var(--muted); font-size: 12px; word-break: break-all; }
+.pill { font-size: 12px; padding: 2px 9px; border-radius: 999px; white-space: nowrap; font-weight: 600; }
+.pill.ok { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+.pill.warn { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+.pill.bad { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); }
+.pill.none { background: var(--track); color: var(--muted); }
+.win { margin-top: 14px; }
+.row { display: flex; justify-content: space-between; font-size: 13px; }
+.row .pct { font-weight: 650; font-variant-numeric: tabular-nums; }
+.bar { height: 8px; background: var(--track); border-radius: 4px; margin: 5px 0 4px; overflow: hidden; }
+.bar i { display: block; height: 100%; border-radius: 4px; }
+.meta { color: var(--muted); font-size: 12px; }
+.tag { color: var(--accent); font-size: 12px; font-weight: 600; margin-left: 6px; }
+.gate { max-width: 340px; margin: 18vh auto 0; padding: 0 16px; }
+.gate input { width: 100%; font: inherit; padding: 10px 12px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--card); color: var(--ink); margin: 14px 0 8px; }
+.gate button { width: 100%; font: inherit; padding: 10px; border-radius: 8px; border: 0;
+  background: var(--accent); color: #fff; font-weight: 600; cursor: pointer; }
+.err { color: var(--bad); font-size: 13px; min-height: 20px; }
+footer { margin-top: 26px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+</style>
+</head>
+<body>
+<div id="gate" class="gate">
+  <h1>额度看板</h1>
+  <div class="sub">输入密码查看</div>
+  <form id="f"><input id="pw" type="password" autocomplete="current-password" placeholder="密码" autofocus>
+  <button type="submit">打开</button></form>
+  <div id="err" class="err"></div>
+</div>
+<main id="app" hidden>
+  <h1>Claude 额度看板</h1>
+  <div class="sub" id="summary"></div>
+  <div class="grid" id="grid"></div>
+  <footer>
+    “实测”是在当前登录账号上发一次极小请求读到的真实用量,每 10 分钟一次。没登录的账号只能用最后一次实测或撞限额时的报错,读数会过时。
+    周额度按固定周期重置,过了重置时间就当已恢复(推算);5 小时窗口从下次使用开始计,恢复后没有固定的下次重置时间。时间为北京时间,括号内为迪拜时间。
+  </footer>
+</main>
+<script>
+const KEY = "quota-board-pw";
+let board = null, pass = null;
+
+function b64(s) { return Uint8Array.from(atob(s), c => c.charCodeAt(0)); }
+
+async function decrypt(text, pw) {
+  const raw = b64(text.trim());
+  if (new TextDecoder().decode(raw.slice(0, 8)) !== "Salted__") throw new Error("format");
+  const salt = raw.slice(8, 16), ct = raw.slice(16);
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(pw), "PBKDF2", false, ["deriveBits"]);
+  const bits = new Uint8Array(await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt, iterations: 200000, hash: "SHA-256" }, base, 384));
+  const key = await crypto.subtle.importKey("raw", bits.slice(0, 32), "AES-CBC", false, ["decrypt"]);
+  const plain = await crypto.subtle.decrypt({ name: "AES-CBC", iv: bits.slice(32, 48) }, key, ct);
+  return JSON.parse(new TextDecoder().decode(plain));
+}
+
+async function load(pw) {
+  const r = await fetch("data.enc?t=" + Date.now(), { cache: "no-store" });
+  if (!r.ok) throw new Error("fetch");
+  return decrypt(await r.text(), pw);
+}
+
+const pad = n => String(n).padStart(2, "0");
+function fmt(d, offsetH) {
+  const t = new Date(d.getTime() + offsetH * 3600e3);
+  return `${t.getUTCMonth() + 1}/${t.getUTCDate()} ${pad(t.getUTCHours())}:${pad(t.getUTCMinutes())}`;
+}
+function when(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return `${fmt(d, 8)}(${fmt(d, 4).split(" ")[1]})`;
+}
+function span(ms) {
+  const m = Math.round(Math.abs(ms) / 60000);
+  const d = Math.floor(m / 1440), h = Math.floor(m % 1440 / 60), mm = m % 60;
+  if (d) return `${d} 天 ${h} 小时`;
+  if (h) return `${h} 小时 ${mm} 分`;
+  return `${mm} 分`;
+}
+function ago(iso) { return iso ? span(Date.now() - new Date(iso)) + "前" : ""; }
+
+// Re-evaluate on the client so a reset that passes while the page is open shows at once.
+function view(w, weekly) {
+  if (!w) return { state: "none" };
+  const now = Date.now();
+  let resets = w.resets ? new Date(w.resets).getTime() : null;
+  let used = w.used, passed = !!w.reset_passed;
+  if (!passed && resets && resets <= now) {
+    passed = true; used = null;
+    if (weekly) { while (resets <= now) resets += 7 * 864e5; } else resets = null;
+  }
+  return { state: "ok", used, passed, resets: resets ? new Date(resets).toISOString() : null,
+           source: w.source, as_of: w.as_of, last_reset: w.last_reset,
+           unknown: passed && !!w.used_since_reset, used_since: w.used_since_reset };
+}
+
+function color(u) {
+  if (u >= 0.95) return "var(--bad)";
+  if (u >= 0.75) return "var(--warn)";
+  return "var(--ok)";
+}
+
+function windowHtml(title, v) {
+  if (v.state === "none") {
+    return `<div class="win"><div class="row"><span>${title}</span><span class="pct">无记录</span></div>
+      <div class="bar"></div><div class="meta">还没有实测或限额记录</div></div>`;
+  }
+  let pct, width, fill, lines = [];
+  if (v.unknown) {
+    pct = "未知"; width = 0; fill = "var(--ok)";
+    lines.push(`${when(v.last_reset)} 已重置,${when(v.used_since)} 又用过,没有实测`);
+  } else if (v.passed) {
+    pct = "已恢复"; width = 0; fill = "var(--ok)";
+    lines.push(`${when(v.last_reset)} 已重置,之后没有新读数`);
+  } else {
+    pct = Math.round(v.used * 100) + "%"; width = Math.min(100, v.used * 100); fill = color(v.used);
+    lines.push(v.source === "live" ? `实测于 ${ago(v.as_of)}` : `撞限额报错于 ${when(v.as_of)}`);
+  }
+  if (v.resets) {
+    const left = new Date(v.resets) - Date.now();
+    lines.push(`${v.passed ? "下次重置" : "重置"} ${when(v.resets)} · 还有 ${span(left)}`);
+  }
+  return `<div class="win"><div class="row"><span>${title}</span><span class="pct">${pct}</span></div>
+    <div class="bar"><i style="width:${width}%;background:${fill}"></i></div>
+    <div class="meta">${lines.join("<br>")}</div></div>`;
+}
+
+function status(a, f, w) {
+  const limited = v => v.state === "ok" && !v.passed && v.used >= 1;
+  if (limited(w)) return ["bad", "周限额中"];
+  if (limited(f)) return ["warn", "5 小时限额中"];
+  if (f.state === "none" && w.state === "none") return ["none", "无记录"];
+  if (w.unknown) return ["none", "用量未知"];
+  if (w.state === "ok" && !w.passed && w.used >= 0.9) return ["warn", "周额度将尽"];
+  return ["ok", "可用"];
+}
+
+function rank(a) {
+  const [cls] = a._status;
+  const order = { ok: 0, none: 1, warn: 2, bad: 3 }[cls];
+  const w = a._w;
+  const used = w.state === "ok" && !w.passed ? w.used : 0;
+  return [a.current ? -1 : 0, order, used];
+}
+
+function render() {
+  if (!board) return;
+  const accs = board.accounts.map(a => {
+    const f = view(a.five_hour, false), w = view(a.seven_day, true);
+    return Object.assign({}, a, { _f: f, _w: w, _status: status(a, f, w) });
+  });
+  accs.sort((x, y) => { const a = rank(x), b = rank(y); return a[0] - b[0] || a[1] - b[1] || a[2] - b[2]; });
+  const free = accs.filter(a => a._status[0] === "ok").map(a => a.label || a.email);
+  const login = board.login ? (accs.find(a => a.current) || {}).label || board.login.email : "无";
+  document.getElementById("summary").innerHTML =
+    `当前登录 <b>${login}</b> · 可用 <b>${free.length ? free.join("、") : "无"}</b> · 数据更新于 ${when(board.generated_at)}(${ago(board.generated_at)})`;
+  document.getElementById("grid").innerHTML = accs.map(a => `
+    <div class="card${a.current ? " current" : ""}">
+      <div class="head"><div><div class="name">${a.label || a.email}${a.current ? '<span class="tag">当前登录</span>' : ""}</div>
+        <div class="email">${a.email}${a.plan ? " · " + a.plan : ""}</div></div>
+        <span class="pill ${a._status[0]}">${a._status[1]}</span></div>
+      ${windowHtml("5 小时", a._f)}
+      ${windowHtml("每周", a._w)}
+    </div>`).join("");
+}
+
+async function open(pw, remember) {
+  board = await load(pw);
+  pass = pw;
+  if (remember) { try { localStorage.setItem(KEY, pw); } catch (e) {} }
+  document.getElementById("gate").hidden = true;
+  document.getElementById("app").hidden = false;
+  render();
+}
+
+document.getElementById("f").addEventListener("submit", async e => {
+  e.preventDefault();
+  const err = document.getElementById("err");
+  err.textContent = "";
+  try { await open(document.getElementById("pw").value, true); }
+  catch (x) { err.textContent = x.message === "fetch" ? "数据读取失败,稍后再试" : "密码不对"; }
+});
+
+(async () => {
+  let saved = null;
+  try { saved = localStorage.getItem(KEY); } catch (e) {}
+  if (saved) { try { await open(saved, false); } catch (e) { try { localStorage.removeItem(KEY); } catch (x) {} } }
+})();
+
+setInterval(render, 30000);
+setInterval(async () => { if (pass) { try { board = await load(pass); render(); } catch (e) {} } }, 300000);
+</script>
+</body>
+</html>
