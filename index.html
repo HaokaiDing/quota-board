@@ -136,6 +136,10 @@ function color(u) {
 }
 
 function windowHtml(title, v) {
+  if (v.state === "free") {
+    return `<div class="win"><div class="row"><span>${title}</span><span class="pct">无周限制</span></div>
+      <div class="bar"></div><div class="meta">这个账号的套餐没有周额度</div></div>`;
+  }
   if (v.state === "none") {
     return `<div class="win"><div class="row"><span>${title}</span><span class="pct">无记录</span></div>
       <div class="bar"></div><div class="meta">还没有实测或限额记录</div></div>`;
@@ -164,6 +168,7 @@ function status(a, f, w) {
   const limited = v => v.state === "ok" && !v.passed && v.used >= 1;
   if (limited(w)) return ["bad", "周限额中"];
   if (limited(f)) return ["warn", "5 小时限额中"];
+  if (f.state === "none" && w.state === "free") return ["ok", "可用"];
   if (f.state === "none" && w.state === "none") return ["none", "无记录"];
   if (w.unknown) return ["none", "用量未知"];
   if (w.state === "ok" && !w.passed && w.used >= 0.9) return ["warn", "周额度将尽"];
@@ -181,7 +186,7 @@ function rank(a) {
 function render() {
   if (!board) return;
   const accs = board.accounts.map(a => {
-    const f = view(a.five_hour, false), w = view(a.seven_day, true);
+    const f = view(a.five_hour, false), w = a.no_weekly ? { state: "free" } : view(a.seven_day, true);
     return Object.assign({}, a, { _f: f, _w: w, _status: status(a, f, w) });
   });
   accs.sort((x, y) => { const a = rank(x), b = rank(y); return a[0] - b[0] || a[1] - b[1] || a[2] - b[2]; });
